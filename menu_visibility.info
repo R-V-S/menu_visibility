@@ -1,0 +1,6 @@
+name = Menu Visibility
+description = Restricts user access to menu items via a menu field
+core = 7.x
+dependencies[] = menu_fields
+files[] = menu_visibility.module
+files[] = menu_visibility.install

@@ -1,0 +1,19 @@
+<?php
+/**
+ * @file workbench_access_menus.install
+ * Contains install and update functions for workbench_access_menus.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function menu_visibility_install() {
+  return menu_visibility_create_menu_field();
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function menu_visibility_uninstall() {
+  // TO DO: Delete field created during install
+}

@@ -1,0 +1,204 @@
+<?php
+/**
+ * @file menu_visibility.module
+ *
+ * Filter menu items by checking a visibility menu field against the user's role(s).
+ *
+ */
+
+function menu_visibility_permission() {
+  return array(
+    'bypass menu visibility' => array(
+      'title' => t('Bypass Menu Visibility'), 
+      'description' => t('Allow users to see all menu items regardless of visibility settings'),
+    ),
+  );
+}
+
+function menu_visibility_create_menu_field() {
+  if ( function_exists('menu_fields_create_field') ) {
+    if ( menu_fields_get_mfid('Visibility Permissions') === false) {
+      $user_role_field = array();
+      $user_role_field['name'] = 'Visibility Permissions';
+      $user_role_field['menu_type'] = 'menuitem';
+      $user_role_field['field_type'] = 'userrole';
+      $user_role_field['description'] = 'Specify the user roles that are allowed to see this menu item.';
+      $user_role_field['weight'] = 10;
+
+      menu_fields_create_field($user_role_field);    
+    }
+    
+    if ( menu_fields_get_mfid('Show this link to anonymous users.') === false) {
+      $visibility_type_field['name'] = 'Show this link to anonymous users.';
+      $visibility_type_field['menu_type'] = 'menuitem';
+      $visibility_type_field['field_type'] = 'checkbox';
+      $visibility_type_field['description'] = 'The link will be visible to anonymous users, but it will direct the user to a login page.';
+      $visibility_type_field['weight'] = 11;
+
+      menu_fields_create_field($visibility_type_field);
+    }
+  } else {
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+function menu_visibility_block_view_alter(&$data, $block) {
+  if ( $block->delta == 'main-menu' || $block->module == 'menu') {
+    menu_visibility_process_menu_block($data);
+  }
+}
+
+function menu_visibility_process_menu_block(&$data) {
+  if(isset($data['content']) && is_array($data['content']) && count($data['content']) > 3 ) {
+    global $user;
+    // extract the menu name from one of the menu items
+    $mlids = array_keys($data['content']);
+    $subject = isset($data['content'][$mlids[0]]['#original_link']['menu_name'])?
+      $data['content'][$mlids[0]]['#original_link']['menu_name']:'';
+    // cache by user role combination
+    $cache_key = _menu_visibility_cache_key($subject,$user->roles);
+    //$cache_key = 'menu-vis-main-menu:'.$data['subject'].':'.md5(implode('-',$user->roles));
+    if($cached_data = cache_get($cache_key)) {
+      $data['content'] = $cached_data->data;
+    } else {
+      $data['content'] = _menu_visibility_evaluate_links($data['content']);
+      // 24 hour cache (60*60*24)
+      cache_set($cache_key,$data['content'],'cache',time()+86400);
+    }
+  }
+}
+
+/**
+ * Utility function to clear menu vis. cache
+ */
+function _menu_visibility_clear_cache(&$item) {
+  // Try to only clear exactly he menu we just updated
+  $subject = isset($item['menu_name'])?$item['menu_name']:'';
+  // Clear the menu for all roles and pages
+  $key = _menu_visibility_cache_key($subject,'',TRUE);
+  // true means wildcard, so everything starting with & incl. key
+  cache_clear_all($key,'cache',TRUE);
+}
+
+/**
+ * Implements hook_menu_link_insert().
+ */
+function menu_visibility_menu_link_insert($link) {
+  _menu_visibility_clear_cache($link);
+}
+
+/**
+ * Implements hook_menu_link_update().
+ */
+function menu_visibility_menu_link_update($link) {
+  _menu_visibility_clear_cache($link);
+}
+
+/**
+ * Implements hook_menu_link_delete().
+ */
+function menu_visibility_menu_link_delete($link) {
+  _menu_visibility_clear_cache($link);
+}
+
+/**
+ * Utility function to get a common key.
+ */
+function _menu_visibility_cache_key($subject = '',$roles = '',$all=FALSE) {
+  $key = 'menu-vis-main-menu:';
+  // Append the menu subject, if provided
+  if(!empty($subject)) {
+    $key .= $subject.':';
+    // if roles is provided, append it
+    if(!empty($roles)) {
+      // if roles is an array, convert it
+      if(is_array($roles)) {
+        $roles = implode('-',$roles);
+      }
+    }
+    if(!$all) {
+      $q = (isset($_GET['q']))?$_GET['q']:'';
+      $key .= md5($roles.$q);
+    }
+  }
+  return $key;
+}
+
+function _menu_visibility_evaluate_links(&$links) {
+  foreach($links as $link_key => &$link) {
+    if ( !is_array($link) || !isset($link['#original_link']) ) {
+      continue;
+    }
+    if ($link['#below']) {
+      $links[$link_key]['#below'] = _menu_visibility_evaluate_links($link['#below']);
+    }
+    $show_link = _menu_visibility_evaluate_link($link);
+    if (!$show_link) {
+      unset($links[$link_key]);
+    }
+  }
+
+  return $links;
+}
+
+function _menu_visibility_evaluate_link(&$link) {
+  global $user;
+
+  // Super admins see all
+  if ( user_access('bypass menu visibility') ) {
+    return true;
+  }
+  
+  static $visibility_permissions_mfid;
+  if (!$visibility_permissions_mfid) {
+    $visibility_permissions_mfid = menu_fields_get_mfid('Visibility Permissions');
+    if ($visibility_permissions_mfid === false) {
+      $create_field = menu_visibility_create_menu_field();
+      if (!$create_field) { 
+        return false;
+      }
+    }
+  }
+
+  static $anonymous_visibility_mfid;
+  if (!$anonymous_visibility_mfid) {
+    $anonymous_visibility_mfid = menu_fields_get_mfid('Show this link to anonymous users.');
+    if ($anonymous_visibility_mfid === false) {
+      $create_field = menu_visibility_create_menu_field();
+      if (!$create_field) { 
+        return false;
+      }
+    }
+  }
+
+  $mlid = $link['#original_link']['mlid'];
+  // First check visibility for anonymous users:
+  if ( !user_is_logged_in() ) {
+    $show_to_anonymous = menu_fields_get_value($mlid, $anonymous_visibility_mfid);
+    if ($show_to_anonymous) {
+      $link['#attributes']['class'][] = 'locked';
+      return true;
+    } 
+  }
+  // Otherwise, fetch an array of user roles that are allowed to see the link:
+  $valid_user_roles = menu_fields_get_value($mlid, $visibility_permissions_mfid);
+
+  // If no value is defined, do not hide the menu item
+  if ( !$valid_user_roles || !is_array($valid_user_roles) ) {
+    return true;
+  }
+  // 0 is an imaginary role that represents all users: 
+  if ( in_array(0, $valid_user_roles) ) {
+    return true;
+  }
+  // if $valid_user_roles is a valid and non-empty array, check to see if there's
+  // overlap between that array and the user's roles:
+  if ( array_intersect($valid_user_roles, array_keys($user->roles) ) ) {
+    return true;
+  }
+  
+  // If all else fails, deny visibility:
+  return false;
+}
